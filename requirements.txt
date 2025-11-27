@@ -1,0 +1,9 @@
+# Conteúdo do arquivo requirements.txt
+streamlit
+google-genai
+faiss-cpu
+numpy
+scipy
+tenacity
+beautifulsoup4
+nltk

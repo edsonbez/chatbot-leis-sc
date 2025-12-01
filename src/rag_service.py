@@ -21,9 +21,6 @@ def text_generator(response_stream):
         yield chunk.text 
 # ------------------------------------------------------------
 
-# REMOVIDO: A variável GEMINI_API_KEY é agora injetada via função.
-# GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'AIzaSyCLHCLhQ6QQIXXbWeDxxCD3IBAAG9v9Y3Y')
-
 # Definição do modelo LLM a ser usado
 LLM_MODEL = "gemini-2.5-flash"
 

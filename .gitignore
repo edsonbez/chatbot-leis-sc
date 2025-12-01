@@ -1,0 +1,17 @@
+# Ambientes Virtuais e Cache
+venv/
+venv_chatbot/
+venv_novo/
+Envs/
+__pycache__/
+*.pyc
+
+# Arquivos de Dados Grandes e Locais (CRÍTICO: Não devem subir)
+faiss_index.bin
+documents_map.json
+chunks_processados.json
+chroma_db/
+.streamlit/secrets.toml # Chave local não deve ser publicada
+
+# Arquivos Antigos/Redundantes
+chatbot.py

@@ -3,21 +3,18 @@ import time
 import sys
 import os
 
-# CRÍTICO: Importa o módulo chatbot inteiro.
+
+# Adiciona o diretório raiz do projeto (onde está o app_web.py) ao caminho de busca do Python
+# Isso garante que a importação 'src.rag_service' funcione localmente.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# ------------------------------------------------------------------
+# CRÍTICO: Importa o módulo de serviço RAG (antigo chatbot.py).
 try:
-    import chatbot
-except ImportError:
-    st.error("Erro: Não foi possível importar o módulo 'chatbot.py'. Verifique se o arquivo existe e se não contém erros de sintaxe.")
+    # Acessa o novo arquivo rag_service dentro da pasta src
+    import src.rag_service as chatbot
+except ImportError as e:
+    st.error(f"Erro: Não foi possível importar o módulo 'src.rag_service'. Verifique a nova estrutura de pastas. Detalhe: {e}")
     st.stop()
-
-
-# --- FUNÇÃO GERADORA PARA PROCESSAR O STREAM ---
-def text_generator(response_stream):
-    """Função geradora que extrai e retorna o texto de cada chunk do stream."""
-    for chunk in response_stream:
-        # Acessa o texto de cada chunk. O .text é o acessor padrão do SDK.
-        yield chunk.text 
-# ------------------------------------------------------------
 
 
 # --- Configuração da Página Streamlit ---
@@ -141,7 +138,7 @@ if prompt := st.chat_input("Faça sua pergunta sobre as Leis de SC:"):
         else:
             # st.write_stream usa a função geradora para exibir o texto
             with text_placeholder.container():
-                full_response = st.write_stream(text_generator(response_result))
+                full_response = st.write_stream(chatbot.text_generator(response_result))
 
 
         # ----------------------------------------------------------------------

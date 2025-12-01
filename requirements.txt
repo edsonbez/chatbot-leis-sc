@@ -1,4 +1,5 @@
 # Conteúdo do arquivo requirements.txt
+# teste
 streamlit
 google-genai
 faiss-cpu

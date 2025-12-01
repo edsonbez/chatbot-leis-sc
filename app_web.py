@@ -69,7 +69,7 @@ def clear_chat_history():
     # Adiciona a mensagem inicial novamente
     st.session_state.messages.append({"role": "assistant", "content": "Olá! Sou seu assistente jurídico especializado em Leis de Santa Catarina. Como posso ajudar na sua consulta legal hoje?"})
 
-    st.rerun() 
+    # st.rerun()  REMOVIDA
 # --------------------------------------------------------------------------
 
 # 1. INICIALIZA O ESTADO DA SESSÃO PARA O HISTÓRICO

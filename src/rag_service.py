@@ -12,7 +12,6 @@ from typing import Union
 
 # --- Configurações Iniciais ---
 
-
 # --- FUNÇÃO GERADORA PARA PROCESSAR O STREAM ---
 def text_generator(response_stream):
     """Função geradora que extrai e retorna o texto de cada chunk do stream."""
@@ -116,10 +115,8 @@ def extract_unique_id(user_query: str) -> Union[str, None]:
     """Usa o Gemini para extrair o ID ÚNICO de uma lei na query do usuário."""
     global client
     
-    # REMOVIDO: if client is None: initialize_gemini_client()
-        
     EXTRACT_PROMPT = f"""
-    ANALISE a seguinte pergunta do usuário e TENTE extrair o identificador único da lei ou decreto, INCLUINDO O ANO.
+    ANALIZE a seguinte pergunta do usuário e TENTE extrair o identificador único da lei ou decreto, INCLUINDO O ANO.
     O formato de retorno DEVE ser EXATAMENTE um dos seguintes:
     - Se a lei for complementar: LC_NUMERO_ANO (Ex: LC_656_2015)
     - Se for lei ordinária/promulgada: LEI_NUMERO_ANO (Ex: LEI_16852_2015)
@@ -151,6 +148,32 @@ def extract_unique_id(user_query: str) -> Union[str, None]:
     except Exception as e:
         print(f"Erro na extração do ID ÚNICO pelo LLM: {e}. Retornando Nulo.")
         return None
+
+# --- NOVO: Função para extrair a parte do artigo (Art_4, §_1º, etc.) ---
+def parse_article_from_query(query: str) -> Union[str, None]:
+    """Extrai a seção do artigo (Art. N, Parágrafo único, etc.) da consulta."""
+    
+    # Busca por padrões de artigos (Art. N, § N, Parágrafo único, Caput)
+    match_art = re.search(
+        r'(Art\.\s*\d+º?|Artigo\s*\d+º?|§\s*\d+º?|Parágrafo\s*único|Caput)', 
+        query, 
+        re.IGNORECASE
+    )
+    
+    if match_art:
+        # Normaliza o termo encontrado (ex: 'Art. 4º' -> 'ART_4')
+        art_part = match_art.group(0).replace(' ', '_').replace('.', '').replace('º', '').upper()
+        # Remove caracteres indesejados, mantendo letras, números e _
+        art_part = re.sub(r'[^\w_]', '', art_part)
+        
+        # Garante que o formato seja ART_N (se for Artigo_N)
+        if art_part.startswith('ARTIGO_'):
+            art_part = art_part.replace('ARTIGO_', 'ART_')
+            
+        print(f"Parte do Artigo extraída via Regex: {art_part}")
+        return art_part
+        
+    return None
 
 # --- NOVO e FINAL: Extração do número da lei via Regex (Fallback Fuzzy) ---
 def extract_law_number_from_query(query: str) -> Union[str, None]:
@@ -186,8 +209,6 @@ def extract_law_number_from_query(query: str) -> Union[str, None]:
 def rewrite_query_with_context(user_query: str, history: list) -> str:
     """Usa o Gemini para reescrever uma consulta vaga baseada no contexto do histórico."""
     global client
-    
-    # REMOVIDO: if client is None: initialize_gemini_client()
     
     context_turns = []
     recent_history = history[:-1] 
@@ -235,91 +256,127 @@ def rewrite_query_with_context(user_query: str, history: list) -> str:
         print(f"Erro na reescrita da query pelo LLM: {e}. Usando query original.")
         return user_query
 
-
+# -----------------------------------------------------------------------------------------
+# FUNÇÃO GET_CONTEXT MODIFICADA COM AS TRÊS ROTAS (C, A, B)
+# -----------------------------------------------------------------------------------------
 def get_context(query_text: str, history: list, k: int = 10) -> tuple[str, set]:
-    """Busca os documentos mais relevantes no índice FAISS usando a Busca Híbrida (ID Único ou Número Fuzzy)."""
+    """Busca os documentos mais relevantes no índice FAISS usando a Busca Integral, Híbrida ou Semântica."""
     global VECTOR_INDEX, DOCUMENTS_MAP, client
     
     if VECTOR_INDEX is None:
         return "", set()
     
-    # REMOVIDO: if client is None: initialize_gemini_client()
-        
-    # ----------------------------------------------------------------------
-    # *** BLINDAGEM ROBUSTA POR ID ÚNICO (Busca Forçada no Mapa) ***
-    # ----------------------------------------------------------------------
+    # 1. Tenta reescrever a query para resolver o contexto de conversa (CRÍTICO para todas as rotas)
+    search_query = rewrite_query_with_context(query_text, history)
     
-    # 1. Tenta extrair ID ÚNICO COMPLETO (LLM - Preciso)
-    target_unique_id = extract_unique_id(query_text) 
+    # 2. Extrai IDs e Partes Necessárias (Movido para o topo para uso em todas as rotas)
+    law_base_id = extract_unique_id(search_query) # Ex: LC_715_2018
+    article_part = parse_article_from_query(search_query) # Ex: ART_4
+    fuzzy_law_number = extract_law_number_from_query(search_query) # Ex: 715
+
+    # ----------------------------------------------------------------------
+    # *** ROTA C: BUSCA DO TEXTO COMPLETO (INTEGRAL) - Prioridade Máxima ***
+    # ----------------------------------------------------------------------
+    is_full_text_request = re.search(r'texto completo|na íntegra|lei toda', search_query, re.IGNORECASE)
     
-    # 2. Fallback: Se o LLM falhou (não encontrou o ano), tenta extrair só o número via Regex (Fuzzy)
-    target_law_number = None
-    if target_unique_id is None:
-        target_law_number = extract_law_number_from_query(query_text)
+    # Define a chave para a busca integral (ID completo ou número fuzzy)
+    full_text_search_key = law_base_id or (fuzzy_law_number if is_full_text_request else None)
 
-    search_key = target_unique_id if target_unique_id else target_law_number
-
-    if search_key:
-        forced_context_parts = []
-        forced_cited_sources = set()
+    if is_full_text_request and full_text_search_key:
+        print(f"DEBUG ROTA C: Ativando Busca de Texto Completo para chave: {full_text_search_key}")
         
-        print(f"DEBUG: Tentando Busca Híbrida/Forçada para chave: {search_key}") 
+        full_text_parts = []
+        full_text_cited_sources = set()
         
-        # Itera sobre o mapa de documentos para encontrar a chave
+        # Coleta TODOS os chunks da lei que contêm a chave no ID_UNICO
         for doc_id, item in DOCUMENTS_MAP.items():
             current_unique_id = item['metadata'].get('ID_UNICO', '')
             
-            is_match = False
-            
-            if target_unique_id and current_unique_id == target_unique_id:
-                # MATCH 1: Busca Exata (LLM forneceu o ID completo)
-                is_match = True
-            elif target_law_number and target_law_number in current_unique_id:
-                # MATCH 2: Busca Fuzzy (Regex forneceu apenas o número, mas o ID o contém)
-                is_match = True
-                
-            if is_match:
+            # Verifica se a chave (ID completo ou fuzzy) está no ID ÚNICO do chunk
+            if full_text_search_key in current_unique_id: 
                 doc = item['text']
                 source = item['metadata'].get('fonte', 'Fonte Desconhecida')
-                
                 source_name = os.path.basename(source) if source else 'Fonte Desconhecida'
                 
-                forced_cited_sources.add(source_name)
-                # Coleta todos os chunks dessa lei
-                forced_context_parts.append(f"[Contexto Forçado ({source_name})]: {doc.strip()}")
-                
-        # 3. Se a busca forçada encontrou a lei (exata ou fuzzy), RETORNA APENAS O CONTEXTO FORÇADO.
-        if forced_context_parts:
-            match_type = "ID_UNICO" if target_unique_id else "Número Fuzzy"
-            print(f"SUCESSO CRÍTICO: Lei encontrada via busca forçada por {match_type}. Ignorando FAISS e Query Rewrite.")
-            forced_context = "\n\n---\n\n".join(forced_context_parts)
-            return forced_context, forced_cited_sources
+                full_text_cited_sources.add(source_name)
+                # Adiciona o chunk completo
+                full_text_parts.append(doc.strip())
+        
+        if full_text_parts:
+            # Concatena todos os chunks, preservando a ordem que eles aparecem no mapa (que deve ser a ordem original da lei)
+            print(f"SUCESSO ROTA C: {len(full_text_parts)} chunks da lei ({full_text_search_key}) concatenados no contexto.")
+            
+            # Formata o contexto para o LLM
+            full_context = "[TEXTO COMPLETO DA LEI SOLICITADA - CONSOLIDAÇÃO DE TODOS OS CHUNKS]:\n\n" + "\n\n---\n\n".join(full_text_parts)
+            return full_context, full_text_cited_sources
+            
+        else:
+            print(f"AVISO ROTA C: Chave {full_text_search_key} não encontrou chunks para texto completo. Seguindo para Rota A.")
+            # Se a rota C falhar, o fluxo continua para as rotas A/B.
+
 
     # ----------------------------------------------------------------------
-    # *** FIM DA BLINDAGEM ROBUSTA *** # ----------------------------------------------------------------------
+    # *** ROTA A: BUSCA DETERMINÍSTICA (ID Base + Artigo) ***
+    # ----------------------------------------------------------------------
+    
+    # Define a CHAVE DE BUSCA para Rota A (Prioriza ID completo > Número Fuzzy)
+    search_key_a = law_base_id
+    if not search_key_a and article_part:
+        search_key_a = fuzzy_law_number # Fallback fuzzy se só tiver artigo
 
-    # --- Código FAISS Normal (Fallback) ---
-    # 4. APLICAR REESCRITA DE QUERY SOMENTE SE A BUSCA BLINDADA FALHOU OU NÃO FOI ATIVADA.
-    # ISSO ECONOMIZA TEMPO DE API.
-    search_query = rewrite_query_with_context(query_text, history)
+    if search_key_a and article_part:
+        # Tenta o ID Determinístico Completo (ex: LC_715_2018_ART_4)
+        deterministic_id = f"{law_base_id}_{article_part}" if law_base_id else None
+        
+        print(f"DEBUG: Chave de Busca Rota A: {search_key_a}")
+        
+        # 4. ROTA A - Busca Determinística (Exata)
+        if deterministic_id and deterministic_id in DOCUMENTS_MAP:
+            item = DOCUMENTS_MAP[deterministic_id]
+            doc = item['text']
+            source_name = os.path.basename(item['metadata'].get('fonte', 'Fonte Desconhecida'))
+            
+            forced_context = f"[Contexto Rota A - ID Determinístico ({source_name})]: {doc.strip()}"
+            print(f"SUCESSO ROTA A: Artigo {deterministic_id} encontrado diretamente no mapa.")
+            # Retorna apenas o chunk exato.
+            return forced_context, {source_name}
+            
+        # 5. ROTA A HÍBRIDA - Fallback (Lei Completa)
+        else:
+            print(f"AVISO ROTA A: ID exato ou completo não encontrado para {search_key_a}. Tentando Busca Híbrida (Lei Completa).")
+            
+            forced_context_parts = []
+            forced_cited_sources = set()
+            
+            # Coleta TODOS os chunks da lei que contêm o search_key (completo ou fuzzy)
+            for doc_id, item in DOCUMENTS_MAP.items():
+                current_unique_id = item['metadata'].get('ID_UNICO', '')
+                
+                # Verifica se a chave (LC_715_2018 ou 715) está no ID ÚNICO do chunk
+                if search_key_a in current_unique_id: 
+                    doc = item['text']
+                    source = item['metadata'].get('fonte', 'Fonte Desconhecida')
+                    source_name = os.path.basename(source) if source else 'Fonte Desconhecida'
+                    
+                    forced_cited_sources.add(source_name)
+                    # Coloca o chunk completo (com as alterações)
+                    forced_context_parts.append(f"[Contexto Forçado da Lei ({source_name})]: {doc.strip()}")
+            
+            # Se a busca forçada encontrou chunks, usa a lei completa
+            if forced_context_parts:
+                print(f"SUCESSO ROTA A HÍBRIDA: Chunks da lei ({search_key_a}) (total {len(forced_context_parts)}) forçados no contexto.")
+                forced_context = "\n\n---\n\n".join(forced_context_parts)
+                # O LLM agora terá todo o texto da lei para encontrar o Artigo.
+                return forced_context, forced_cited_sources
+                
+    # ----------------------------------------------------------------------
+    # *** ROTA B: BUSCA SEMÂNTICA (FAISS) - Fallback final ***
+    # ----------------------------------------------------------------------
     
     final_search_query = search_query
     n_results_faiss = 10 
     
-    # Se a busca forçada falhou, mas tínhamos um ID, otimiza a query FAISS (Embedding)
-    if search_key: # Se tentamos buscar uma lei, mas não a encontramos no mapa (ex: lei não existe), otimizamos a busca FAISS
-        # Cria um prefixo que força o modelo a focar no ID e nos termos chave.
-        forced_prefix = (
-            f"BUSCAR DETALHES DA LEI IDENTIFICADA COMO {search_key}. "
-            f"Foco na Ementa, Artigo 1º e Objeto. "
-        )
-        final_search_query = forced_prefix + search_query
-        print(f"Query Otimizada para Busca Exata (k=10): {final_search_query}")
-        n_results_faiss = 10
-    
-    # ------------------------------------------------------------------
-        
-    # 5. Geração de Embedding da FINAL_SEARCH_QUERY via API do Google
+    # 6. Geração de Embedding da FINAL_SEARCH_QUERY via API do Google
     try:
         response = client.models.embed_content(
             model=EMBEDDING_MODEL_GOOGLE,
@@ -332,7 +389,7 @@ def get_context(query_text: str, history: list, k: int = 10) -> tuple[str, set]:
         print(f"ERRO DE EMBEDDING CRÍTICO da QUERY (Google): {type(e).__name__} - {e}")
         return "", set()
     
-    # 6. Busca no FAISS
+    # 7. Busca no FAISS
     try:
         indices, _ = _query_faiss(query_embedding, n_results_faiss)
         
@@ -340,7 +397,6 @@ def get_context(query_text: str, history: list, k: int = 10) -> tuple[str, set]:
         cited_sources = set()
         
         for i, index in enumerate(indices):
-            
             if index < len(DOCUMENTS_MAP):
                 doc_id = list(DOCUMENTS_MAP.keys())[index]
                 item = DOCUMENTS_MAP[doc_id]
@@ -351,7 +407,7 @@ def get_context(query_text: str, history: list, k: int = 10) -> tuple[str, set]:
                 full_source_name = os.path.basename(source) if source else 'Fonte Desconhecida'
                 cited_sources.add(full_source_name)
                 
-                context_parts.append(f"[Contexto {i+1} ({full_source_name})]: {doc.strip()}")
+                context_parts.append(f"[Contexto Rota B - Semântica {i+1} ({full_source_name})]: {doc.strip()}")
             
         context = "\n\n---\n\n".join(context_parts)
         
@@ -360,14 +416,15 @@ def get_context(query_text: str, history: list, k: int = 10) -> tuple[str, set]:
     except Exception as e:
         print(f"Erro persistente durante a busca de contexto (após retries) no FAISS: {e}")
         return "", set()
+# -----------------------------------------------------------------------------------------
+# FIM DA FUNÇÃO GET_CONTEXT MODIFICADA
+# -----------------------------------------------------------------------------------------
 
-# O restante das funções (classify_intent e get_response) permanece inalterado, exceto pela remoção das inicializações internas.
+# O restante das funções (classify_intent e get_response) permanece inalterado.
 def classify_intent(query_text: str, history: list) -> str:
     """Classifica a intenção da pergunta do usuário."""
     global client
     
-    # REMOVIDO: if client is None: initialize_gemini_client()
-        
     contextualized_query = query_text
     
     if len(history) > 1:

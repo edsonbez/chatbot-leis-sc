@@ -102,6 +102,33 @@ def normalize_law_id(file_name: str) -> tuple[str, int]:
     
     return unique_id, law_year
 
+
+# --- NOVA FUNÇÃO PARA ID ESPECÍFICO DO ARTIGO ---
+def extract_article_id(chunk_text: str, base_id: str) -> str:
+    """
+    Tenta extrair o Artigo/Parágrafo do início do chunk para criar um ID único
+    para busca determinística. Exemplo: LC_715_2018 + Art. 4º -> LC_715_2018_ART_4
+    """
+    
+    # Regex para encontrar o início de um artigo, parágrafo ou caput
+    # Prioriza o Art. N°
+    # O padrão busca "Art.", "§", "Parágrafo único", ou "Caput" seguido por número/texto relevante.
+    match_art = re.search(r'(Art\.\s*\d+º?|§\s*\d+º?|Parágrafo\s*único|Caput)', chunk_text, re.IGNORECASE)
+    
+    if match_art:
+        # Normaliza o termo encontrado (ex: 'Art. 4º' -> 'ART_4')
+        art_part = match_art.group(0).replace(' ', '_').replace('.', '').replace('º', '').upper()
+        
+        # Remove caracteres indesejados
+        art_part = re.sub(r'[^\w_]', '', art_part)
+        
+        # Retorna o ID base + a parte do artigo
+        return f"{base_id}_{art_part}"
+    
+    # Se não encontrar um artigo/parágrafo específico no começo, retorna o ID base.
+    return base_id
+
+
 # --- FUNÇÃO DE EXTRAÇÃO ATUALIZADA (ROBUSTA E REMOVENDO TAXADO) ---
 def extrair_texto_de_html(caminho_arquivo):
     """
@@ -225,6 +252,11 @@ def processar_e_salvar_leis(caminho_da_pasta_raiz):
                     chunks = chunk_text_optimized(texto_extraido, nome_arquivo, law_year=ano_publicacao, max_chunk_size=CHUNK_SIZE_LIMIT)
                     
                     for i, chunk in enumerate(chunks):
+                        # --- NOVO: GERA ID ESPECÍFICO DO ARTIGO ---
+                        # Cria um ID_UNICO específico, ex: LC_715_2018_ART_4
+                        specific_id = extract_article_id(chunk, unique_id)
+                        # ------------------------------------------
+
                         chunks_data.append({
                             "id": f"doc_{id_counter}",
                             "text": chunk,
@@ -232,7 +264,7 @@ def processar_e_salvar_leis(caminho_da_pasta_raiz):
                                 "fonte": nome_arquivo, 
                                 "ano_publicacao": ano_publicacao,
                                 "chunk_index": i,
-                                "ID_UNICO": unique_id  # <--- CRÍTICO: ID normalizado
+                                "ID_UNICO": specific_id  # agora usa o ID Especifico
                             }
                         })
                         id_counter += 1
